@@ -40,7 +40,7 @@ from candles_utils import handle_candles
 markets = set()
 market_data = defaultdict(lambda:defaultdict(list))
 flux = FluxDeck()
-spot_queue = asyncio.Queue(maxsize=1000)
+spot_queue = asyncio.Queue(maxsize=20000)
 fut_queue = asyncio.Queue(maxsize=1000)
 last_day = datetime.now().day
 rollover = False
@@ -55,7 +55,15 @@ async def day_rollover():
             last_day = now.day
         await asyncio.sleep(45)    
 
-
+def save_file():
+    for symbol in markets:
+        ticks = market_data[symbol]["tick_data"]
+        if ticks:
+            start = ticks[0]["epoch"]
+            end = ticks[-1]["epoch"]
+            df = pd.DataFrame(market_data[symbol]["tick_data"])
+            df.to_csv(f"{symbol}_{start}_{end}.csv",index=False)
+        
 async def handle_stream_spot():
     """Read websocket message from queue and populate market_data
     """
@@ -69,7 +77,6 @@ async def handle_stream_spot():
         #epoch converted to s from ms
         epoch = math.floor(stream_data["T"]/1000)
         symbol = stream_data["s"]
-        df = f"df_{symbol}"
         markets.add(symbol)
         market_data[symbol]["tick_data"].append(
     {"aggressor":aggressor, 
@@ -78,20 +85,16 @@ async def handle_stream_spot():
     "quote":price}) 
         if rollover:
             rollover = False
-            ticks = market_data[symbol]["tick_data"]
-            if ticks:
-                start = ticks[0]["epoch"]
-                end = ticks[-1]["epoch"]
-                df = pd.DataFrame(market_data[symbol]["tick_data"])
-                df.to_csv(f"{symbol}_{start}_{end}.csv",index=False)
-        flux.flux(f"{symbol}",
+            save_file()
+        """   
+        flux.flux(f"{symbol}",f"queue size :{spot_queue.qsize()},"
                      f"aggressor :{aggressor}, "
                      f"volume :{quantity}, market price :"
                      f"{price}, time :"
                      f"{datetime.fromtimestamp(epoch)},"
                      f"{symbol},current time :"
-                     f"{datetime.now()}")
-        await asyncio.sleep(0.1)
+                     f"{datetime.now()}")"""
+        
 
 async def spot_stream():
     """Establish a web socket connection to binance
@@ -100,39 +103,42 @@ async def spot_stream():
     asyncio.create_task(handle_stream_spot())
     try:
         async with connect(
-        "wss://stream.binance.com:9443/stream?streams=btcusdt@aggTrade/ethusdt@aggTrade/btcusdc@aggTrade") as ws_spot:
+        "wss://stream.binance.com:9443/stream?streams=btcusdt@aggTrade/ethusdt@aggTrade/btcusdc@aggTrade",
+        ping_interval=20,
+    ping_timeout=20,
+    max_queue=None
+    ) as ws_spot:
             flux.flux("spot stream connection","successful")
             while True:
                 msg_spot = json.loads(await ws_spot.recv())
                 await spot_queue.put(msg_spot)
-                await asyncio.sleep(0.1)
                 
     except Exception:
          print("spot_stream_error",
          traceback.print_exc())
-
+async def heartbeat():
+    while True:
+        if markets:
+            print("still alive,current market data len:",len(market_data[list(markets)[0]]["tick_data"]))
+        else:
+            print("starting up")
+        await asyncio.sleep(60)
 
 async def main():
     """Establish a websocket connection
        with binance and populate queue
     """
-    await asyncio.gather(day_rollover(),
-    spot_stream())
     
     try:
-        pass
-        
+        await asyncio.gather(day_rollover(),
+    spot_stream(),heartbeat())
                 
     except Exception:
         print("Main program error",traceback.print_exc()) 
     finally:   
         print(" Program Ending")
         if markets:
-            for symbol in markets:
-                start = market_data[symbol]["tick_data"][0]["epoch"]
-                end = market_data[symbol]["tick_data"][-1]["epoch"]
-                df = pd.DataFrame(market_data[symbol]["tick_data"])
-                df.to_csv(f"{symbol}_{start}_{end}.csv",index=False)
+            save_file()
         print("saved")
     
         
