@@ -4,14 +4,6 @@ from dataclasses import dataclass, asdict
 import pandas as pd
 from datetime import datetime
 
-
-@dataclass
-class PriceBin:
-    price: float
-    buy_volume: float = 0.0
-    sell_volume: float = 0.0
-
-
 # -----------------------------
 # Candle structure
 # -----------------------------
@@ -24,6 +16,8 @@ class Candle:
     close: float
     open_epoch:int
     close_epoch:int
+    raw_profile:dict
+    binned_profile:list
 
 
 # -----------------------------
@@ -71,10 +65,17 @@ class CandleEngine:
         # ---------------------
         if candle is None or candle.bucket != bucket:
             if candle is not None:
+                bins = self._build_profile_bins(tf, candle, n_bins=10)
+                candle.binned_profile = bins
+                candle.raw_profile = self.profile[tf]
                 self.completed[tf].append(asdict(candle))
-                print(tf,"open:",self.dt(candle.open_epoch),"close:",self.dt(candle.close_epoch))
-                print(self.profile)
+                print(tf,"open:",self.dt(candle.open_epoch),"close:",self.dt(candle.close_epoch),candle)
+                print("PROFILE BINS:")
+                for b in bins:
+                    print(b)
                 print("=================/=====/=======")
+                # reset profile for next candle
+                self.profile[tf].clear()
 
             self.active[tf] = Candle(
                 open_epoch=epoch,
@@ -83,7 +84,9 @@ class CandleEngine:
                 open=price,
                 high=price,
                 low=price,
-                close=price
+                close=price,
+                raw_profile=0,
+                binned_profile=0
             )
             return
 
@@ -102,6 +105,38 @@ class CandleEngine:
         else:
             bin_["sell"] += qty
             
+    def _build_profile_bins(self, tf, candle, n_bins=10):
+        profile = self.profile[tf]
+        if not profile:
+            return []
+
+        prices = list(profile.keys())
+
+        low = min(prices)
+        high = max(prices)
+
+        if high == low:
+            return [{
+                "price": low,
+                "buy": sum(v["buy"] for v in profile.values()),
+                "sell": sum(v["sell"] for v in profile.values())
+            }]
+
+        step = (high - low) / n_bins
+
+        bins = [
+            {"buy": 0.0, "sell": 0.0, "low": low + i * step, "high": low + (i + 1) * step}
+            for i in range(n_bins)
+        ]
+
+        for price, vol in profile.items():
+            idx = int((price - low) / step)
+            if idx == n_bins:  # edge case for max price
+                idx -= 1
+            bins[idx]["buy"] += vol["buy"]
+            bins[idx]["sell"] += vol["sell"]
+
+        return bins
     # -------------------------
     # Force flush (e.g. shutdown)
     # -------------------------
@@ -146,7 +181,7 @@ async def main():
     df = pd.read_csv("BTCUSDT_1780935750_1781111401.csv")
     lst = df.to_dict(orient="records")
     print(len(lst))
-    lst = lst[0:1000]
+    lst = lst[0:3000]
     for i,item in enumerate(lst):
         market_data["R"]["tick_data"].append(item)
         #print("we are in main i =",i,datetime.fromtimestamp(item["epoch"]),item["quote"])
